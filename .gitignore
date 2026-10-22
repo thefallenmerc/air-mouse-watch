@@ -1,0 +1,12 @@
+build/
+dist/
+backups/
+logs/
+macos/.build/
+.DS_Store
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+macos/.swiftpm/
