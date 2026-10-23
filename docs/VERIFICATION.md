@@ -1,4 +1,157 @@
-# Verification — 2026-10-22
+# Verification
+
+## Native macOS pairing repair (0.2.2)
+
+Inspection of Arduino-ESP32 3.3.10 found that its HID report factory only calls
+`setAccessPermissions()` for encryption; that characteristic method is a no-op
+under NimBLE. The input report therefore lacked `READ_ENC`, although the
+application refused to send mouse data before encryption. The custom configuration
+service did have encrypted attributes and could trigger security independently.
+
+`HidReports.h` now constructs protected report characteristics, with public
+report-reference metadata for enumeration. `PairingLifecycle.h` releases failed
+or 45-second unencrypted attempts; encrypted links do not expire. The companion
+only attaches to a peripheral macOS already has connected. Remembered UUIDs and
+advertisements alone cannot initiate a connection. Its optional 20-second
+`--scan-diagnostics` mode prints watch advertisements without connecting.
+The primary advertisement now carries the complete mouse name, appearance and
+HID UUID; the optional configuration UUID occupies the scan response.
+
+`logs/test-native-pairing.log` records passing Swift, Python and sanitizer-backed
+C++ checks. Added coverage exercises the actual report factory with a NimBLE-style
+no-op permission setter and pairing failure/timeout/reconnect/wraparound behavior.
+The signed companion release build passed. Both firmware profiles built before
+the final advertising-layout adjustment; the final OpenMouse profile also built.
+
+The advertisement iteration's 716,288-byte OpenMouse image was installed and readback-verified on
+2026-10-24, SHA-256
+`c79bae00be2aa6b89a8b174d007b00e1760c25e5be278ab19c2a63c2183fc792`.
+Evidence: `logs/flash-native-pairing-advertisement-corrected.log`.
+The complete pre-update backup is `backups/20261023T183016.010657Z/`;
+subsequent app1-only iterations preserve the replaced region under
+`backups/pairing-advertisement-*/`. The last update did not write the partition
+table, OTA selector, app0, NVS or media. Runtime heartbeats confirm touch ready,
+gyro off and no active host (`logs/native-pairing-corrected-live.log`).
+
+The initial 0.2.2 security repair did not resolve the missing Connect button.
+After a user-triggered button reset, a scan-only diagnostic observed the fresh
+watch with HID UUID 0x1812, mouse appearance 962 and connectable=true. A filtered
+live macOS Bluetooth log independently classified it as BLEHID and Connectable
+(`logs/advertisement-native-pairing.log`,
+`logs/native-advertisement-mac-stream.log`). No native connection reached the
+watch during those attempts. The user confirmed that Connect was missing for
+**every nearby device**, not only the watch. System Settings was restarted and
+Bluetooth cycled once without deleting any saved devices.
+
+Native Bluetooth Settings subsequently completed Just Works pairing and enabled
+encryption, but the watch disconnected immediately afterward. macOS recorded a
+remote-initiated disconnect and failed key restoration on its automatic retry
+(`logs/native-disconnect-detail.log`). A live retry without a watch reset produced
+`Bluetooth encryption handle=1 status=0`, followed by disconnect reason 534
+(local-host termination), then a failed reconnect (`logs/native-disconnect-live.log`).
+This establishes native security negotiation, but **not a usable mouse connection**.
+Targeted connection-ownership and bond-store diagnostics were built and installed
+with readback verification (`logs/flash-native-disconnect-diagnostics.log`):
+716,912 bytes, SHA-256
+`cb1c5e6601817122afcb8b60d5def458c74213b99166daf7a1be07c58f1ea089`.
+The app1 region backup is `backups/pairing-advertisement-20261023T194132Z/`.
+Identity, bonds, settings, media and app0 were preserved. A fresh native attempt
+captured two bond-store overflow callbacks (results 0 then 5), immediately followed
+by successful encryption and local termination. Evidence:
+`logs/native-disconnect-instrumented.log`.
+
+The saved NVS metadata contains all three `rpa_rec_*` entries but no surviving
+peer encryption keys. Inspection of the exact ESP-IDF 5.5.4 NimBLE revision
+`5c1a43ca3d205c3d5183e57dedce335fb6a81155` found that
+`ble_store_config_find_rpa_rec()` does not match wildcard keys, although
+`ble_store_clear()` supplies one. Old private-address mappings therefore survive
+pairing resets. The default `BLE_STORE_OBJ_TYPE_PEER_ADDR` overflow handler calls
+`ble_gap_unpair_oldest_peer()`, which can evict the newly created bond, terminate
+the link, and leave the already-full alias cache unchanged.
+
+`PeerAddressCache.h` enumerates only the pinned `nimble_bond/rpa_rec_1..3` address
+cache metadata and deletes entries by exact address through NimBLE's API. This
+keeps RAM and NVS synchronized. On address-cache overflow it reclaims one alias,
+preferring an older alias for the same host, without deleting any encryption keys
+or subscriptions. BOOT reset clears these aliases explicitly before normal bond
+reset. Errors do not report success or retry without making space. The original
+handling of other store object types is preserved. Tests model repeated private
+address changes, sparse NVS indexes, exact-key deletion, preservation of bonds,
+and read/delete failures. The complete Swift/Python/sanitizer-backed C++ suite
+passed in `logs/test-native-pairing-cache-fix.log`. Subsequent live checks are
+recorded below; the overflow branch itself has not been observed in a live retry.
+
+The cache-repair OpenMouse build was installed and readback-verified on
+2026-10-24: 717,696 bytes, SHA-256
+`777d3e7951ae409e68523964af1242ede166332c3fc432acba672efc763dfb3c`.
+Evidence: `logs/build-native-pairing-cache-fix.log` and
+`logs/flash-native-pairing-cache-fix.log`. The replaced app1 region is preserved
+in `backups/pairing-advertisement-20261023T195408Z/`. The address cache was
+deliberately retained for the next test, as were the watch identity, settings,
+media, partition table, OTA selector and original app0.
+
+Pinned upstream evidence: [address-cache finder](https://github.com/espressif/esp-nimble/blob/5c1a43ca3d205c3d5183e57dedce335fb6a81155/nimble/host/store/config/src/ble_store_config.c),
+[wildcard clear](https://github.com/espressif/esp-nimble/blob/5c1a43ca3d205c3d5183e57dedce335fb6a81155/nimble/host/src/ble_store.c),
+and [default overflow eviction](https://github.com/espressif/esp-nimble/blob/5c1a43ca3d205c3d5183e57dedce335fb6a81155/nimble/host/src/ble_store_util.c).
+
+The user then performed a BOOT reset (observed in USB logs) and native pairing.
+The link remained `connected=1 encrypted=1 hid=1` for several minutes, but the
+user reported no cursor movement. This verifies stable pairing after the repaired
+reset, not recovery from cache overflow without reset. Evidence:
+`logs/native-cache-fix-live.log`. The companion remained closed.
+
+macOS did not register an IOHIDDevice. Its BTLEServer log explicitly reported
+“Not creating HID device as the link is not encrypted” at 01:26:53.909; encryption
+and pairing completed afterward. Evidence: `logs/native-cache-fix-driver-init.log`
+and `logs/native-cache-fix-gatt.log`. Input-report subscription initiated security
+too late for native HID creation. A project-local patch now protects the report-map
+read with `READ_ENC` so enumeration cannot complete before encryption.
+
+Source inspection also found `BLEService::addCharacteristic()` dropping distinct
+objects with duplicate UUIDs. Thus the feature reports advertised in the report
+map were absent from GATT. `tools/ble_library.py` verifies the complete installed
+BLE source hash, stages it under `build/libraries/BLE`, and applies narrow fixes
+for duplicate report registration and report-map encryption. It never edits the
+global Arduino core. A sanitizer-backed test executes the extracted upstream
+registration method to reproduce one registered report before the patch and four
+after it. Additional tests verify map permissions and reject unknown source.
+The full suite passed before the final report-map addition, whose four focused
+patch/staging tests also passed. Both final firmware profiles compiled successfully;
+`logs/build-native-hid-enumeration-standard.log` records the standard profile build
+(the installed watch uses the OpenMouse profile). The complete repaired firmware built successfully using the project-local BLE
+library and was flashed with readback verification: 717,904 bytes, SHA-256
+`3cbcf0af48753872899f380b89ecc08a8102b2423a10536be4452403129f7d60`.
+Evidence: `logs/build-native-hid-enumeration-fix.log` and
+`logs/flash-native-hid-enumeration-fix.log`. The replaced app1 region is preserved
+in `backups/pairing-advertisement-20261023T200813Z/`. The companion is closed;
+startup diagnostics confirm touch initialized and enabled, with pointer unpaused.
+Native pairing then registered Air Mouse Watch in `hidutil list` with
+`AppleUserHIDEventDriver`, vendor `0x2FE3` and product `0xA101`. The user confirmed
+cursor movement; USB diagnostics recorded encrypted HID subscription and 401
+movement reports during the initial drag. Evidence:
+`logs/native-hid-enumeration-live.log` and
+`logs/native-hid-enumeration-registered.txt`.
+
+The initial successful pairing followed another observed BOOT reset. The user
+then confirmed three successful native Forget/Connect attempts with working
+cursor movement and no further BOOT reset. The USB capture independently records
+two subsequent re-pairing cycles on the same identity, successful encryption,
+and movement reports increasing to 937. Thus repeated pairing is physically
+verified, but the repaired address-cache overflow branch was not triggered in
+this capture.
+
+An ordinary watch restart through `esptool run` (no flash writes or bond clearing)
+automatically restored the encrypted HID connection and native mouse driver,
+with no companion running and no user pairing action. Evidence:
+`logs/native-hid-reboot.log`, `logs/native-hid-reconnect-live.log`, and
+`logs/native-hid-reconnect-registered.txt`.
+
+Native pairing, repeated Forget/re-pair, physical touch cursor movement and
+watch-restart reconnection are now verified on this Mac with the companion closed.
+Mac restart/sleep-wake, long-term private-address churn, and OpenMouse browser
+feature transactions remain untested on this revision. The global missing Connect
+button was a separate observed macOS-side symptom; its underlying cause is not
+established by the firmware defects or scan results.
 
 ## Image upload repair (0.2.1)
 

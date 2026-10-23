@@ -33,7 +33,7 @@ This avoids the reversed integer order in ESP32 core 3.3.10's `pnp()` helper.
 | Feature ID | Length | Contents |
 | --- | --- | --- |
 | 2 | 11 | polling u16, lift u8, DPI X u16, DPI Y u16, invert/swap u8, angle i16, deep-sleep u8 |
-| 3 | 8 | no dongle version, actual experiment firmware version 0.2.1 |
+| 3 | 8 | no dongle version, actual experiment firmware version 0.2.2 |
 | 4 | 4 | battery percent, reserved, unknown charge-state code, presence flag when data is available |
 
 All integers are little-endian. Feature payloads in GATT omit the HID report-ID

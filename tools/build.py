@@ -2,6 +2,7 @@
 """Build only. Never connects to or flashes a watch."""
 import argparse, hashlib, json, os, pathlib, shutil, subprocess, sys
 import boot
+import ble_library
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 LOCK = json.loads((ROOT / 'dependencies.lock.json').read_text())
 cli = os.environ.get('ARDUINO_CLI') or shutil.which('arduino-cli') or '/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli'
@@ -21,8 +22,10 @@ parser.add_argument('--openmouse-compat',action='store_true',help='Experimental 
 args=parser.parse_args()
 output = ROOT / ('build/firmware-openmouse' if args.openmouse_compat else 'build/firmware')
 output.mkdir(parents=True, exist_ok=True)
+ble = ble_library.prepare(core / LOCK['arduino_core'] / 'libraries/BLE',
+                          ROOT / 'build/libraries/BLE', LOCK['ble_library_sha256'])
 options=['--build-property','compiler.cpp.extra_flags=-DAIR_MOUSE_OPENMOUSE_COMPAT=1'] if args.openmouse_compat else []
-subprocess.run(command + ['compile', '--fqbn', LOCK['fqbn'], '--libraries', str(ROOT/'vendor/libraries'), '--build-path', str(output), '--build-cache-path',str(ROOT/'build/arduino-cache')] + options + [str(ROOT/'firmware/AirMouse')], check=True)
+subprocess.run(command + ['compile', '--fqbn', LOCK['fqbn'], '--library', str(ble), '--libraries', str(ROOT/'vendor/libraries'), '--build-path', str(output), '--build-cache-path',str(ROOT/'build/arduino-cache')] + options + [str(ROOT/'firmware/AirMouse')], check=True)
 binary = output/'AirMouse.ino.bin'
 table = (output/'AirMouse.ino.partitions.bin').read_bytes()
 if boot.parse_table(table) != boot.MEDIA_LAYOUT: sys.exit('Build did not use the dedicated media partition table; do not flash.')

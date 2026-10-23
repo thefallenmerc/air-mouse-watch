@@ -1,5 +1,5 @@
 {
-  "firmware": "air-mouse-0.2.1",
+  "firmware": "air-mouse-0.2.2",
   "board": "Waveshare ESP32-S3-Touch-AMOLED-2.06",
   "arduino_core": "3.3.10",
   "fqbn": "esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,PSRAM=opi,FlashSize=32M,PartitionScheme=app13M_data7M_32MB",
@@ -402,5 +402,6 @@
     "revision": "bac031567b28f2a55c616fc525b03f2d5fa452cc",
     "codec": "moddo feature reports 2, 3, 4",
     "runtime_dependency": false
-  }
+  },
+  "ble_library_sha256": "f631fa25a3b7dcfaae85b8e4f8fac0d56564d727a954b09de651fd5b4318b8b8"
 }

@@ -18,8 +18,8 @@ def main():
     app=ROOT/'dist/Air Mouse.app'; contents=app/'Contents'; (contents/'MacOS').mkdir(parents=True,exist_ok=True)
     shutil.copy2(ROOT/'build/swift/release/AirMouse',contents/'MacOS/AirMouse')
     info={'CFBundleExecutable':'AirMouse','CFBundleIdentifier':'dev.experiments.airmouse','CFBundleName':'Air Mouse',
-          'CFBundleDisplayName':'Air Mouse','CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.2.1',
-          'CFBundleVersion':'3','LSMinimumSystemVersion':'13.0','LSUIElement':True,
+          'CFBundleDisplayName':'Air Mouse','CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.2.2',
+          'CFBundleVersion':'4','LSMinimumSystemVersion':'13.0','LSUIElement':True,
           'NSBluetoothAlwaysUsageDescription':'Air Mouse uses Bluetooth to configure your watch and transfer images. Mouse input works independently.',
           'NSHighResolutionCapable':True}
     with (contents/'Info.plist').open('wb') as f: plistlib.dump(info,f)

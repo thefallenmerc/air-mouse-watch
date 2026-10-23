@@ -11,6 +11,33 @@ with normal mouse-style Just Works (no MITM authentication). Bonds are stored
 by the bundled NimBLE stack in NVS. Only one active host is supported by this
 application's state model.
 
+The 28-byte primary advertisement contains general-discoverable/LE-only flags,
+mouse appearance, the HID service UUID and the complete device name. The 18-byte
+scan response advertises the optional configuration service UUID. Both fit the
+legacy 31-byte limit independently. Startup checks the packet lengths and whether
+advertising actually started.
+
+From firmware 0.2.2, HID report characteristics explicitly carry NimBLE's
+`READ_ENC` / `WRITE_ENC` flags. Arduino-ESP32 3.3.10's HID factory omits these,
+and its characteristic `setAccessPermissions()` has no effect with NimBLE.
+Report-reference descriptors remain public for enumeration. The HID report-map
+read requires encryption, making native driver creation wait for pairing rather
+than racing the asynchronous notification subscription. Input reports remain
+protected as well. No companion service access is needed to initiate security.
+The project-local BLE build also registers every distinct report characteristic,
+even though they share UUID `0x2a4d`; each has its own report-reference descriptor.
+Failed security and unencrypted connections lasting 45
+seconds are disconnected so advertising can resume. Established encrypted links
+do not expire. The stack replaces an old bond when the same host pairs again.
+
+The pinned stack's private-address cache has three slots and a broken wildcard
+deletion path. Firmware enumerates its persisted address records and removes
+them through exact-key NimBLE calls during BOOT reset. On cache overflow it
+replaces an alias (preferably for the same peer), preserving encryption keys and
+subscriptions instead of allowing the default handler to unpair the mouse.
+This adapter depends on Arduino-ESP32 3.3.10's NVS schema and must be reviewed
+when upgrading the pinned core. It does not modify global Arduino libraries.
+
 The custom UUID base is `b8571000-7f12-4c31-9638-37b2d28a6421`:
 
 | First UUID field | Purpose | Access |
@@ -22,6 +49,8 @@ The custom UUID base is `b8571000-7f12-4c31-9638-37b2d28a6421`:
 
 The native client retrieves already connected peripherals as well as scanning;
 an OS-owned HID connection can therefore also carry companion configuration.
+It only connects to peripherals already connected by macOS. A remembered UUID
+or a scan result alone never initiates a connection, including after Forget.
 
 ## Commands
 

@@ -36,18 +36,30 @@ import Combine
     private var poll: Timer?
     private var cancelled = false
     private var reconnect = true
+    private let diagnosticScan = CommandLine.arguments.contains("--scan-diagnostics")
     init(preview: Bool = false) {
         super.init()
         if preview { status="Connect your watch"; return }
         central = CBCentralManager(delegate:self,queue:.main,options:[CBCentralManagerOptionShowPowerAlertKey:true])
+        if diagnosticScan {
+            // Read-only diagnostics: never retrieve/connect, even a remembered watch.
+            Timer.scheduledTimer(withTimeInterval:20,repeats:false) { _ in exit(0) }
+            return
+        }
         poll = Timer.scheduledTimer(withTimeInterval:2,repeats:true) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.ready, !self.busy, self.pending == nil else { return }
+                guard let self else { return }
+                if !self.ready {
+                    if self.reconnect && !self.connecting && self.central.state == .poweredOn { self.findConnectedWatches() }
+                    return
+                }
+                guard !self.busy, self.pending == nil else { return }
                 do { _ = try await self.request(1) } catch { self.error = error.localizedDescription }
             }
         }
     }
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        if diagnosticScan { print("Bluetooth scan state=\(central.state.rawValue)") }
         switch central.state {
         case .poweredOn: status="Looking for your watch…"; scan()
         case .poweredOff: status="Bluetooth is off"; disconnected()
@@ -60,28 +72,45 @@ import Combine
         guard central.state == .poweredOn else { return }
         guard !connecting, !ready else { return }
         central.stopScan(); devices=[]; error=nil
+        if diagnosticScan {
+            central.scanForPeripherals(withServices:nil,options:[CBCentralManagerScanOptionAllowDuplicatesKey:false])
+            return
+        }
         reconnect=true
-        for p in central.retrieveConnectedPeripherals(withServices:[Self.service]) { discovered(p) }
-        // macOS can already hold the HID link while the peripheral stops advertising.
-        for p in central.retrieveConnectedPeripherals(withServices:[CBUUID(string:"1812")]) where p.name == "Air Mouse Watch" { discovered(p) }
-        // Only reconnect a remembered identity when it is actually observed/connected.
-        // Cached peripherals survive a watch pairing reset and can otherwise block
-        // discovery by starting a connection to the now-retired address.
+        findConnectedWatches()
+        if connecting { return }
         central.scanForPeripherals(withServices:[Self.service,CBUUID(string:"1812")],options:[CBCentralManagerScanOptionAllowDuplicatesKey:false])
     }
-    private func discovered(_ p: CBPeripheral) {
+    private func findConnectedWatches() {
+        // macOS can already hold the HID link while the peripheral stops advertising.
+        for p in central.retrieveConnectedPeripherals(withServices:[Self.service]) { discovered(p,alreadyConnected:true) }
+        for p in central.retrieveConnectedPeripherals(withServices:[CBUUID(string:"1812")]) where p.name == "Air Mouse Watch" { discovered(p,alreadyConnected:true) }
+    }
+    private func discovered(_ p: CBPeripheral, alreadyConnected: Bool = false) {
         if !devices.contains(where:{$0.identifier==p.identifier}) { devices.append(p) }
-        if peripheral == nil { status="Watch found — choose Connect" }
-        if peripheral == nil && UserDefaults.standard.string(forKey:"watchID") == p.identifier.uuidString { connect(p) }
+        if peripheral == nil { status=alreadyConnected ? "Mouse available — connect for settings" : "Pair Air Mouse Watch in macOS Bluetooth settings" }
+        // An advertisement is not a pairing request. In particular, after Forget,
+        // do not grab the radio while System Settings is trying to pair the mouse.
+        if alreadyConnected && peripheral == nil && UserDefaults.standard.string(forKey:"watchID") == p.identifier.uuidString { connect(p) }
     }
     func centralManager(_ central: CBCentralManager, didDiscover p: CBPeripheral, advertisementData: [String:Any], rssi RSSI: NSNumber) {
         let services=advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
         let name=advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? p.name
         guard services.contains(Self.service) || name == "Air Mouse Watch" else { return }
+        if diagnosticScan {
+            print("Watch advertisement id=\(p.identifier) data=\(advertisementData) rssi=\(RSSI)")
+            return
+        }
         discovered(p)
     }
     func connect(_ p: CBPeripheral) {
+        guard !diagnosticScan else { return }
         guard peripheral == nil else { return }
+        guard central.retrieveConnectedPeripherals(withServices:[Self.service,CBUUID(string:"1812")]).contains(where:{$0.identifier==p.identifier}) else {
+            status="Pair Air Mouse Watch in macOS Bluetooth settings"
+            error="The companion configures an already connected mouse. Pair the watch in System Settings first."
+            return
+        }
         reconnect=true; error=nil; peripheral=p; p.delegate=self
         status="Connecting to \(p.name ?? "Air Mouse Watch")…"
         central.connect(p,options:nil)
@@ -113,6 +142,7 @@ import Combine
     }
     private func disconnected() {
         connectionTimeout?.cancel(); connectionTimeout=nil
+        peripheral=nil
         ready=false; savedSettings=nil; hidSubscribed=false; paused=false
         statusReceived=false; touchReady=false; storageReady=false; hasMedia=false; openMouseCompatibility=false
         commandChar=nil; replyChar=nil; settingsChar=nil

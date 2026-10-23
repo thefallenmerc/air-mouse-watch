@@ -8,9 +8,10 @@ The watch sends standard Bluetooth LE HID mouse reports directly to macOS.
 The companion configures the watch and transfers images; it does not synthesize
 mouse events and needs no Accessibility permission. First-time Bluetooth pairing
 is still required. This revision is a **touch-only mouse**: gyro pointing and
-calibration have been removed. The previous revision established an encrypted
-HID link on this Mac, including with the companion disconnected. See
-[verification](docs/VERIFICATION.md) for checks on the latest installed build.
+calibration have been removed. Native macOS pairing, repeated Forget/Connect,
+touch cursor movement, and automatic reconnection after a watch restart are
+verified with the companion closed. See [verification](docs/VERIFICATION.md)
+for evidence and remaining checks.
 Static image upload, image persistence after restart, and touch cursor movement
 have been verified on the watch. Pairing reset and use on another host have also
 been confirmed. GIF display, detailed gesture behavior and OpenMouse browser
@@ -67,12 +68,19 @@ Bluetooth settings, then connect it in the app's Watch tab. Save settings with
 **Save to watch**; sliders edit a draft until saved.
 
 The watch saves settings in NVS. The Mac remembers only the selected peripheral
-identifier in UserDefaults and reconnects to it. Closing the app does not remove
+identifier in UserDefaults and attaches when macOS already has its mouse connection.
+Scanning alone never initiates pairing; pair through System Settings first.
+Closing the app does not remove
 the watch's saved configuration or images. Pause is a runtime state that resets
 on a Bluetooth disconnect or watch restart.
 
 Use `open 'dist/Air Mouse.app' --args --preview` for a disconnected UI preview
 that does not initialize Bluetooth.
+
+For local discovery diagnostics, run the app executable with
+`--scan-diagnostics`. It prints only watch advertisements and Bluetooth state,
+never connects or pairs, and exits after 20 seconds. This is a troubleshooting
+mode, not part of normal mouse setup.
 
 ## Images and GIFs
 
@@ -111,6 +119,14 @@ The build helper requires only the pinned ESP32 core version in that configured
 core directory. Build output and checksum manifest go to `build/firmware/`.
 
 The BLE stack comes from Arduino-ESP32 3.3.10's bundled NimBLE-backed BLE library.
+The build helper verifies that library's source hash, stages a project-local copy
+under `build/libraries/BLE`, and fixes its registration of multiple HID Report
+characteristics sharing UUID `0x2a4d`. It also requires encryption before the HID
+report map can be read, so native driver creation waits for pairing to finish.
+The global Arduino installation is unchanged.
+The firmware also handles the pinned stack's private-address cache overflow
+without discarding pairing keys. See the native pairing investigation in
+[verification](docs/VERIFICATION.md) for live test results and remaining checks.
 The sketch uses its checked-in 32 MiB partition table. The preserved app0 remains
 12.5 MiB; app1 starts at `0xC90000` and is 4 MiB. The separate `airmedia` data
 partition starts at `0x1090000` and contains two 4 MiB banks. These retain the

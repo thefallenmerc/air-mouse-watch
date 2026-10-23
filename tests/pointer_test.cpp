@@ -1,6 +1,7 @@
 #include "../firmware/AirMouse/Pointer.h"
 #include "../firmware/AirMouse/PairingButton.h"
 #include "../firmware/AirMouse/TransferClock.h"
+#include "../firmware/AirMouse/PairingLifecycle.h"
 #include "../firmware/AirMouse/MediaFormat.h"
 #include "../firmware/AirMouse/OpenMouseProfile.h"
 #include <cassert>
@@ -52,6 +53,19 @@ int main(int argc, char **argv) {
   transfer.clear(); assert(!transfer.expired(999999));
   transfer.touch(0xfffffff0); assert(!transfer.expired(100)); assert(transfer.expired(31000));
   transfer.touch(0); assert(transfer.expired(30001)); // Zero is a valid timestamp.
+  PairingLifecycle pairing;
+  assert(!pairing.update(1,true,false,false,100));
+  assert(!pairing.update(1,true,false,false,45099));
+  assert(pairing.update(1,true,false,false,45100));
+  assert(!pairing.update(1,true,false,false,46000)); // One disconnect per attempt.
+  assert(!pairing.update(2,true,false,false,47000)); // New connection, even same handle.
+  assert(pairing.update(2,true,false,true,47001)); // Failed encryption releases immediately.
+  assert(!pairing.update(3,true,true,false,48000));
+  assert(!pairing.update(3,true,true,false,100000)); // Healthy links have no timeout.
+  assert(!pairing.update(3,false,false,false,100001));
+  assert(!pairing.update(4,true,false,false,0xfffffff0));
+  assert(!pairing.update(4,true,false,false,0x10));
+  assert(pairing.update(4,true,false,false,45000)); // millis wrap.
   // Legacy saved settings and writes cannot enable motion; retain other preferences.
   c.flags=7; c.touchGain=2.5f; c.disableMotion(); assert(c.flags==6&&c.touchGain==2.5f);
   assert((Settings().flags&1)==0);

@@ -9,6 +9,9 @@
 #include <host/ble_store.h>
 #include "PairingButton.h"
 #include "TransferClock.h"
+#include "HidReports.h"
+#include "PairingLifecycle.h"
+#include "PeerAddressCache.h"
 #include "Hardware.h"
 #include "Display.h"
 #include "OpenMouseProfile.h"
@@ -32,10 +35,14 @@ std::atomic<bool> connected{false}, encrypted{false}, subscribed{false}, resetLi
 std::atomic<bool> suspended{false};
 std::atomic<uint16_t> activeConnection{BLE_HS_CONN_HANDLE_NONE};
 std::atomic<uint16_t> subscribedConnection{BLE_HS_CONN_HANDLE_NONE};
+std::atomic<uint16_t> failedConnection{BLE_HS_CONN_HANDLE_NONE};
+std::atomic<uint32_t> connectionEpoch{0};
+air::PairingLifecycle pairingLifecycle;
 air::TransferClock transferClock;
 bool paused = false, erasePending = false, pairingMode = false;
 uint8_t eraseReply[3] = {};
 uint32_t lastInput = 0, lastStatus = 0;
+uint32_t touchSamples = 0, motionReports = 0;
 int pendingX = 0, pendingY = 0, pendingWheel = 0, pendingPan = 0;
 uint8_t pressed = 0;
 uint32_t releaseAt = 0;
@@ -62,6 +69,7 @@ uint8_t reportMap[] = {
 void clearInput() { pendingX = pendingY = pendingWheel = pendingPan = 0; pressed = 0; gesture.reset(); pointerScale.reset(); }
 bool canSend() { return connected && encrypted && subscribed && !suspended && !paused; }
 void sendReport(uint8_t buttons, int x, int y, int wheel, int pan) {
+  if (x || y || wheel || pan) ++motionReports;
   uint8_t value[7] = {buttons, uint8_t(x), uint8_t(x >> 8), uint8_t(y), uint8_t(y >> 8), uint8_t(wheel), uint8_t(pan)};
   mouseReport->setValue(value, sizeof(value)); mouseReport->notify();
 }
@@ -138,14 +146,18 @@ class CompatCallbacks: public BLECharacteristicCallbacks {
 class ServerCallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer *server, ble_gap_conn_desc *desc) override {
     if (!desc) return;
+    Serial.printf("Bluetooth connect callback handle=%u active=%u encrypted=%u bonded=%u\n", desc->conn_handle, activeConnection.load(), desc->sec_state.encrypted, desc->sec_state.bonded);
     uint16_t expected = BLE_HS_CONN_HANDLE_NONE;
     if (!activeConnection.compare_exchange_strong(expected, desc->conn_handle)) {
+      Serial.printf("Rejecting extra host handle=%u active=%u\n", desc->conn_handle, expected);
       server->disconnect(desc->conn_handle); return; // This mouse supports one host.
     }
+    failedConnection = BLE_HS_CONN_HANDLE_NONE; ++connectionEpoch;
     connected = true; encrypted = desc->sec_state.encrypted; suspended = false; subscribed = subscribedConnection.load() == desc->conn_handle; resetLink = true;
     Serial.printf("Bluetooth connected handle=%u encrypted=%d\n", desc->conn_handle, int(encrypted.load()));
   }
   void onDisconnect(BLEServer*, ble_gap_conn_desc *desc) override {
+    if (desc) Serial.printf("Bluetooth disconnect callback handle=%u active=%u encrypted=%u bonded=%u\n", desc->conn_handle, activeConnection.load(), desc->sec_state.encrypted, desc->sec_state.bonded);
     if (!desc || desc->conn_handle != activeConnection.load()) return;
     activeConnection = BLE_HS_CONN_HANDLE_NONE; subscribedConnection = BLE_HS_CONN_HANDLE_NONE;
     connected = false; encrypted = false; subscribed = false; resetLink = true;
@@ -154,11 +166,24 @@ class ServerCallbacks: public BLEServerCallbacks {
 };
 class SecurityCallbacks: public BLESecurityCallbacks {
   bool onSecurityRequest() override { return true; }
-  void onAuthenticationComplete(ble_gap_conn_desc *desc) override { updateSecurity(desc); }
+  void onAuthenticationComplete(ble_gap_conn_desc *desc) override {
+    if (desc) Serial.printf("Bluetooth authentication handle=%u encrypted=%u bonded=%u keysize=%u\n", desc->conn_handle, desc->sec_state.encrypted, desc->sec_state.bonded, desc->sec_state.key_size);
+    updateSecurity(desc);
+  }
 };
+class BondStoreCallbacks: public BLEDeviceCallbacks {
+  int onStoreStatus(ble_store_status_event *event, void *arg) override {
+    const int rc = air::PeerAddressCache::onStatus(event, arg);
+    const int type = event->event_code == BLE_STORE_EVENT_OVERFLOW ? event->overflow.obj_type : event->full.obj_type;
+    Serial.printf("Bluetooth bond store event=%u type=%d result=%d\n", event->event_code, type, rc);
+    return rc;
+  }
+} bondStoreCallbacks;
 int logBluetoothEvent(ble_gap_event *event, void*) {
-  if (event->type == BLE_GAP_EVENT_ENC_CHANGE)
-    Serial.printf("Bluetooth encryption status=%d\n", event->enc_change.status);
+  if (event->type == BLE_GAP_EVENT_ENC_CHANGE) {
+    Serial.printf("Bluetooth encryption handle=%u status=%d\n", event->enc_change.conn_handle, event->enc_change.status);
+    if (event->enc_change.status != 0) failedConnection = event->enc_change.conn_handle;
+  }
   else if (event->type == BLE_GAP_EVENT_DISCONNECT)
     Serial.printf("Bluetooth disconnected reason=%d\n", event->disconnect.reason);
   else if (event->type == BLE_GAP_EVENT_REPEAT_PAIRING)
@@ -170,9 +195,10 @@ void startBluetooth() {
   if (!commands) { display.status("Queue allocation failed"); while (true) delay(1000); }
   BLEDevice::init("Air Mouse Watch"); BLEDevice::setMTU(247);
   BLEDevice::setCustomGapHandler(logBluetoothEvent);
+  BLEDevice::setDeviceCallbacks(&bondStoreCallbacks);
   const bool freshPairing = preferences.getBool("reset-pairing", false);
   pairingMode = freshPairing;
-  if (freshPairing && ble_store_clear() != 0) {
+  if (freshPairing && (air::PeerAddressCache::clear() != 0 || ble_store_clear() != 0)) {
     Serial.println("Pairing reset: bond store clear failed");
     display.status("Pair reset failed: reboot"); while (true) delay(1000);
   }
@@ -202,9 +228,8 @@ void startBluetooth() {
   BLESecurity::setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND);
   BLESecurity::setCapability(ESP_IO_CAP_NONE); // Normal mouse pairing, no companion or passkey entry required.
   BLESecurity::setInitEncryptionKey(); BLESecurity::setRespEncryptionKey();
-  // Let macOS enumerate and initiate pairing. Forcing SMP during its discovery
-  // connection makes macOS reject the request before the user selects Connect.
-  // Configuration attributes and all mouse reports still require encryption.
+  // Allow discovery without unsolicited pairing. The protected input report
+  // triggers security when the OS reads/subscribes, without a companion service.
   BLESecurity::setForceAuthentication(false);
   auto server = BLEDevice::createServer(); server->setCallbacks(new ServerCallbacks());
   server->advertiseOnDisconnect(false); // Only the active host disconnect restarts advertising.
@@ -221,7 +246,7 @@ void startBluetooth() {
   hid->deviceInfo()->getCharacteristic(BLEUUID(uint16_t(0x2a50)))->setValue(identity, sizeof(identity));
   hid->hidInfo(0, 0x02);
   hid->reportMap(reportMap, sizeof(reportMap));
-  mouseReport = hid->inputReport(1); mouseReport->setCallbacks(&mouseCallbacks);
+  mouseReport = secureHidReport(*hid, 1, true); mouseReport->setCallbacks(&mouseCallbacks);
   hid->hidControl()->setCallbacks(&controlCallbacks);
   uint8_t zero[7] = {}; mouseReport->setValue(zero, sizeof(zero));
   auto service = server->createService(ServiceUUID);
@@ -231,28 +256,33 @@ void startBluetooth() {
   reply->addDescriptor(new BLE2902());
   settingsValue = service->createCharacteristic(SettingsUUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_READ_ENC);
 #if AIR_MOUSE_OPENMOUSE_COMPAT
-  compatConfig=hid->featureReport(2);compatConfig->setCallbacks(&compatCallbacks);
-  auto version=hid->featureReport(3);uint8_t firmware[8]={0,0,0,0,0,2,1,1};version->setValue(firmware,8);
-  compatBattery=hid->featureReport(4);uint8_t unknownBattery[4]={255,0,0,0};compatBattery->setValue(unknownBattery,4);
+  compatConfig=secureHidReport(*hid,2,false);compatConfig->setCallbacks(&compatCallbacks);
+  auto version=secureHidReport(*hid,3,false);uint8_t firmware[8]={0,0,0,0,0,2,2,1};version->setValue(firmware,8);
+  compatBattery=secureHidReport(*hid,4,false);uint8_t unknownBattery[4]={255,0,0,0};compatBattery->setValue(unknownBattery,4);
 #endif
   publishSettings();
   service->start(); hid->startServices();
   auto advertising = BLEDevice::getAdvertising();
-  // Exactly 29 bytes: flags(3), appearance(4), HID UUID(4), config UUID(18).
-  // The automatic builder silently drops the config UUID when preferred intervals
-  // consume another 6 bytes. Put the complete name in the separate scan response.
+  // Present the complete mouse identity in the primary packet (28 bytes).
+  // Keep the optional configuration UUID in the scan response (18 bytes),
+  // independently discoverable by the companion without crowding mouse discovery.
   BLEAdvertisementData advertisement, scanResponse;
   advertisement.setFlags(0x06);
   advertisement.setAppearance(HID_MOUSE);
   advertisement.setCompleteServices(BLEUUID(uint16_t(0x1812)));
-  advertisement.setCompleteServices(BLEUUID(ServiceUUID));
-  scanResponse.setName("Air Mouse Watch");
-  if (advertisement.getPayload().length() != 29 ||
+  advertisement.setName("Air Mouse Watch");
+  scanResponse.setCompleteServices(BLEUUID(ServiceUUID));
+  if (advertisement.getPayload().length() != 28 || scanResponse.getPayload().length() != 18 ||
       !advertising->setAdvertisementData(advertisement) || !advertising->setScanResponseData(scanResponse)) {
     Serial.println("Bluetooth advertising setup failed");
     display.status("Bluetooth setup error"); while (true) delay(1000);
   }
-  advertising->setScanResponse(true); advertising->start();
+  advertising->setScanResponse(true);
+  if (!advertising->start()) {
+    Serial.println("Bluetooth advertising start failed");
+    display.status("Bluetooth start failed"); while (true) delay(1000);
+  }
+  Serial.println("Bluetooth advertising started: primary HID/name, scan response configuration");
 }
 void respond(const uint8_t *request, uint8_t result) {
   // <=20 bytes so replies work at the minimum ATT MTU.
@@ -330,11 +360,17 @@ void setup() {
   display.begin(config.brightness); display.status("Touch mouse starting");
   hardware.begin(); media.begin(); startBluetooth();
   lastInput = millis();
-  Serial.println("Air Mouse 0.2.1: touch-only BLE HID; hold BOOT 3 sec then release to reset pairing");
+  Serial.println("Air Mouse 0.2.2: protected HID pairing; touch-only; hold BOOT 3 sec then release to reset pairing");
 }
 void loop() {
   uint32_t now = millis();
   refreshSecurity();
+  const uint16_t handle = activeConnection.load();
+  const bool pairingFailed = failedConnection.exchange(BLE_HS_CONN_HANDLE_NONE) == handle && handle != BLE_HS_CONN_HANDLE_NONE;
+  if (pairingLifecycle.update(connectionEpoch.load(), connected.load(), encrypted.load(), pairingFailed, now)) {
+    const int rc = ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
+    Serial.printf("Releasing incomplete pairing handle=%u failed=%d rc=%d\n", handle, int(pairingFailed), rc);
+  }
   const bool wasButtonDown = pairingButton.down();
   if (pairingButton.update(hardware.pairingButtonPressed(), now)) {
     if (canSend()) sendReport(0,0,0,0,0);
@@ -360,6 +396,7 @@ void loop() {
   if (now - lastInput >= 8) {
     lastInput = now;
     auto sample = hardware.touch();
+    if (sample.valid && sample.down) ++touchSamples;
     if (!paused && !pairingButton.down()) enqueue(gesture.update(sample, now, config)); else gesture.reset();
     pumpMouse(now);
   }
@@ -375,9 +412,10 @@ void loop() {
     static uint32_t lastDiagnostic = 0;
     if (now - lastDiagnostic >= 10000) {
       lastDiagnostic = now;
-      Serial.printf("Air Mouse uptime=%lu gyro=off touch=%d boot=%d connected=%d encrypted=%d hid=%d\n",
+      Serial.printf("Air Mouse uptime=%lu gyro=off touch=%d boot=%d connected=%d encrypted=%d hid=%d suspended=%d paused=%d touchEnabled=%d touchSamples=%lu motionReports=%lu\n",
         static_cast<unsigned long>(now), hardware.touchReady, int(hardware.pairingButtonPressed()),
-        int(connected.load()), int(encrypted.load()), int(subscribed.load()));
+        int(connected.load()), int(encrypted.load()), int(subscribed.load()), int(suspended.load()), int(paused), int(bool(config.flags & 2)),
+        static_cast<unsigned long>(touchSamples), static_cast<unsigned long>(motionReports));
     }
     // AXP2101 battery percentage register (0xA4); don't invent a fixed battery charge.
     uint8_t battery; if (hardware.read(0x34, 0xa4, &battery, 1) && battery <= 100) {
